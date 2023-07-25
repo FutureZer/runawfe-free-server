@@ -132,7 +132,7 @@ public class TaskLogic extends WfCommonLogic {
             if (taskNode instanceof Synchronizable && taskNode.isAsync()) {
                 taskNode.endBoundaryEventTokens(executionContext);
             } else {
-                pushToken(executionContext, task, transition);
+                pushToken(executionContext, task, transition, user);
             }
             log.info("Task '" + task.getName() + "' was done by " + user + " in process " + task.getProcess());
             executionContext.getToken().removeError();
@@ -171,7 +171,7 @@ public class TaskLogic extends WfCommonLogic {
         }
     }
 
-    private void pushToken(ExecutionContext executionContext, Task task, Transition transition) {
+    private void pushToken(ExecutionContext executionContext, Task task, Transition transition, User executor) {
         Token token = executionContext.getToken();
         if (!Objects.equal(task.getNodeId(), token.getNodeId())) {
             throw new InternalApplicationException("completion of " + task + " failed. Different node id in task and token: " + token.getNodeId());
@@ -179,7 +179,7 @@ public class TaskLogic extends WfCommonLogic {
         InteractionNode node = (InteractionNode) executionContext.getNode();
         if (node instanceof MultiTaskNode) {
             MultiTaskNode multiTaskNode = (MultiTaskNode) node;
-            if (multiTaskNode.isCompletionTriggersSignal(task)) {
+            if (multiTaskNode.isCompletionTriggersSignal(task, executor.getActor())) {
                 multiTaskNode.endTokenTasks(executionContext, TaskCompletionInfo.createForHandler(multiTaskNode.getSynchronizationMode().name()));
             } else {
                 log.debug("!MultiTaskNode.isCompletionTriggersSignal in " + task);

@@ -23,10 +23,16 @@ package ru.runa.wfe.lang;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
+
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+
+import org.springframework.beans.factory.annotation.Autowired;
+
 import ru.runa.wfe.commons.GroovyScriptExecutor;
 import ru.runa.wfe.commons.TypeConversionUtil;
 import ru.runa.wfe.commons.Utils;
@@ -39,7 +45,11 @@ import ru.runa.wfe.execution.Swimlane;
 import ru.runa.wfe.execution.Token;
 import ru.runa.wfe.lang.utils.MultiinstanceUtils;
 import ru.runa.wfe.task.Task;
+import ru.runa.wfe.user.Actor;
 import ru.runa.wfe.user.Executor;
+import ru.runa.wfe.user.Group;
+import ru.runa.wfe.user.TemporaryGroup;
+import ru.runa.wfe.user.dao.ExecutorDao;
 import ru.runa.wfe.var.MapDelegableVariableProvider;
 import ru.runa.wfe.var.MapVariableProvider;
 import ru.runa.wfe.var.UserType;
@@ -60,6 +70,11 @@ public class MultiTaskNode extends BaseTaskNode {
     private String discriminatorCondition;
     private MultiTaskSynchronizationMode synchronizationMode;
     private final List<VariableMapping> variableMappings = Lists.newArrayList();
+    private ExecutionContext previousContext;
+    private TemporaryGroup consecutiveGroup;
+    private int consecutiveIndex = 0;
+    @Autowired
+    private transient ExecutorDao executorDao;
 
     @Override
     public void validate() {
@@ -125,7 +140,11 @@ public class MultiTaskNode extends BaseTaskNode {
 
     @Override
     protected void execute(ExecutionContext executionContext) throws Exception {
-        boolean tasksCreated = createTasks(executionContext, getFirstTaskNotNull());
+    	TaskDefinition taskDefenition = getFirstTaskNotNull();
+    	List<?> data = (List<?>) MultiinstanceUtils.parse(executionContext, this).getDiscriminatorValue();
+    	if (synchronizationMode == MultiTaskSynchronizationMode.CONSECUTIVE)
+    		intitializeCreationContext(executionContext, taskDefenition, data);
+        boolean tasksCreated = createTasks(executionContext, taskDefenition, data);
         if (!tasksCreated) {
             log.debug("no tasks were created in " + this);
         }
@@ -135,18 +154,66 @@ public class MultiTaskNode extends BaseTaskNode {
             leave(executionContext);
         }
     }
+    
+    
+    private void intitializeCreationContext(ExecutionContext executionContext, TaskDefinition taskDefinition, List<?> data) {
+        VariableMapping discriminatorMapping = new VariableMapping(getDiscriminatorVariableName(), null, getDiscriminatorUsage());
+        consecutiveGroup = createTemporaryGroup(executionContext, taskDefinition);
+    	if (!discriminatorMapping.isMultiinstanceLinkByVariable() || getCreationMode() == MultiTaskCreationMode.BY_EXECUTORS) {
+    		for (Object executorIdentity : new HashSet<Object>(data)) {
+                Actor actor = TypeConversionUtil.convertTo(Actor.class, executorIdentity);
+                if (actor == null) {
+                    log.debug("Executor is null for identity " + executorIdentity);
+                    continue;
+                }
+                executorDao.addExecutorToGroup(actor, consecutiveGroup);
+            }
+    	} else {
+    		Swimlane swimlane = getInitializedSwimlaneNotNull(executionContext, taskDefinition);
+            Executor executor = swimlane.getExecutor();
+            if (executor instanceof Group) {
+            	Set<Actor> actors = executorDao.getGroupActors((Group)executor);
+            	for (Executor actor: actors) {
+            		executorDao.addExecutorToGroup(actor, consecutiveGroup);
+            	}
+            } else if (executor instanceof Actor) {
+            	executorDao.addExecutorToGroup(executor, consecutiveGroup);
+            } else {
+            	log.debug("Executor is not a group or an actor " + executor.toString());
+            }
+    	}
+    }
+    
+    private TemporaryGroup createTemporaryGroup(ExecutionContext executionContext, TaskDefinition taskDefinition) {
+    	try {
+    		TemporaryGroup tempGroup = TemporaryGroup.create(taskDefinition.getProcessDefinition().getId(), executionContext.getToken().getId().toString());
+    		executorDao.create(tempGroup);
+    		return tempGroup;
+    	} catch (Exception ex) {
+    		log.info(ex.getMessage());
+    	}
+    	return null;
+    }
 
-    private boolean createTasks(ExecutionContext executionContext, TaskDefinition taskDefinition) {
-        List<?> data = (List<?>) MultiinstanceUtils.parse(executionContext, this).getDiscriminatorValue();
+    private boolean createTasks(ExecutionContext executionContext, TaskDefinition taskDefinition, List<?> data) {
         VariableMapping discriminatorMapping = new VariableMapping(getDiscriminatorVariableName(), null, getDiscriminatorUsage());
         boolean tasksCreated;
         // #305#note-49
+        if (synchronizationMode == MultiTaskSynchronizationMode.CONSECUTIVE) {
+            List<Executor> consData = new ArrayList<>();
+            consData.add(consecutiveGroup);
+            data = consData;
+        }
         if (!discriminatorMapping.isMultiinstanceLinkByVariable() || getCreationMode() == MultiTaskCreationMode.BY_EXECUTORS) {
             tasksCreated = createTasksByExecutors(executionContext, taskDefinition, data);
         } else {
             tasksCreated = createTasksByDiscriminator(executionContext, taskDefinition, data);
         }
-        MultiinstanceUtils.autoExtendContainerVariables(executionContext, getVariableMappings(), data.size());
+        if (previousContext == null) {
+        	MultiinstanceUtils.autoExtendContainerVariables(executionContext, getVariableMappings(),  
+        			synchronizationMode == MultiTaskSynchronizationMode.CONSECUTIVE ? executorDao.getGroupActors(consecutiveGroup).size() : data.size());
+        }
+        previousContext = executionContext;
         return tasksCreated;
     }
 
@@ -158,6 +225,7 @@ public class MultiTaskNode extends BaseTaskNode {
                 log.debug("Executor is null for identity " + executorIdentity);
                 continue;
             }
+            if (synchronizationMode == MultiTaskSynchronizationMode.CONSECUTIVE) tasksCounter = consecutiveIndex++;
             taskFactory.create(executionContext, executionContext.getVariableProvider(), taskDefinition, null, executor, tasksCounter, async);
             tasksCounter++;
         }
@@ -181,7 +249,7 @@ public class MultiTaskNode extends BaseTaskNode {
         }
         int tasksCounter = 0;
         Swimlane swimlane = getInitializedSwimlaneNotNull(executionContext, taskDefinition);
-        Executor executor = swimlane.getExecutor();
+        Executor executor = synchronizationMode == MultiTaskSynchronizationMode.CONSECUTIVE ? consecutiveGroup : swimlane.getExecutor();
         Map<String, WfVariable> mappedVariableValues = new HashMap<>();
         for (VariableMapping m : getVariableMappings()) {
             WfVariable listVariable = executionContext.getVariableProvider().getVariableNotNull(m.getName());
@@ -215,21 +283,38 @@ public class MultiTaskNode extends BaseTaskNode {
                     }
                 }
             }
+            if (synchronizationMode == MultiTaskSynchronizationMode.CONSECUTIVE) index = consecutiveIndex++;
             taskFactory.create(executionContext, variableProvider, taskDefinition, swimlane, executor, index, async);
             tasksCounter++;
         }
         return tasksCounter > 0;
     }
 
-    public boolean isCompletionTriggersSignal(Task task) {
+    public boolean isCompletionTriggersSignal(Task task, Actor executor) {
         switch (synchronizationMode) {
             case FIRST:
                 return true;
             case LAST:
                 return isLastTaskToComplete(task);
+            case CONSECUTIVE:
+            	return isAllActorsCompletedTask(executor);
             default:
                 return false;
         }
+    }
+    
+    private boolean isAllActorsCompletedTask(Actor executor) {
+    	executorDao.removeExecutorFromGroup(executor, consecutiveGroup);
+    	List<Actor> actors = Lists.newArrayList(executorDao.getGroupActors(consecutiveGroup));
+    	if (!actors.isEmpty()) createTasks(previousContext, getFirstTaskNotNull(), actors);
+    	else {
+    		try {
+        		executorDao.remove(consecutiveGroup);
+        	} catch (Exception ex) {
+        		log.info(ex.getMessage());
+        	}
+    	}
+    	return actors.isEmpty();
     }
 
     private boolean isLastTaskToComplete(Task task) {

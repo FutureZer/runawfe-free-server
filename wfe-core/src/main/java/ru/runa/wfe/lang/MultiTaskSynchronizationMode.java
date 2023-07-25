@@ -16,5 +16,7 @@ public enum MultiTaskSynchronizationMode {
      * proceeds execution when the last task is completed. when no tasks are
      * created on entrance of this node, execution is continued.
      */
-    LAST
+    LAST,
+    CONSECUTIVE,
+    
 }
