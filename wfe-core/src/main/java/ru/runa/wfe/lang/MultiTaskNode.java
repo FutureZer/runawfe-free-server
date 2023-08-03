@@ -148,7 +148,7 @@ public class MultiTaskNode extends BaseTaskNode {
                 executorDao.addExecutorToGroup(actor, consecutiveGroup);
             }
     	} else {
-    		Swimlane swimlane = getInitializedSwimlaneNotNull(executionContext, taskDefinition);
+    		CurrentSwimlane swimlane = getInitializedSwimlaneNotNull(executionContext, taskDefinition);
             Executor executor = swimlane.getExecutor();
             if (executor instanceof Group) {
             	Set<Actor> actors = executorDao.getGroupActors((Group)executor);
@@ -165,7 +165,7 @@ public class MultiTaskNode extends BaseTaskNode {
     
     private TemporaryGroup createTemporaryGroup(ExecutionContext executionContext, TaskDefinition taskDefinition) {
     	try {
-    		TemporaryGroup tempGroup = TemporaryGroup.create(taskDefinition.getProcessDefinition().getId(), executionContext.getToken().getId().toString());
+    		TemporaryGroup tempGroup = TemporaryGroup.create(taskDefinition.getParsedProcessDefinition().getId(), executionContext.getToken().getId().toString());
     		executorDao.create(tempGroup);
     		return tempGroup;
     	} catch (Exception ex) {

@@ -176,7 +176,7 @@ public class TaskLogic extends WfCommonLogic {
     }
 
     private void pushToken(ExecutionContext executionContext, Task task, Transition transition, User executor) {
-        CurrentToken token = executionContext.getToken();
+        CurrentToken token = executionContext.getCurrentToken();
         if (!Objects.equal(task.getNodeId(), token.getNodeId())) {
             throw new InternalApplicationException("completion of " + task + " failed. Different node id in task and token: " + token.getNodeId());
         }
